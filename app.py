@@ -16,7 +16,8 @@ Then open http://localhost:5000
 import csv, json, os, re
 from pathlib import Path
 from datetime import datetime, date
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from functools import wraps
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context, session, redirect, url_for
 import anthropic
 
 app = Flask(__name__)
@@ -30,6 +31,32 @@ POTO_DATA_JSON = DATA_DIR / 'poto-data.json'
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ── Password protection (optional — set DASHBOARD_PASSWORD env var to enable) ───
+DASHBOARD_PASSWORD = os.environ.get('DASHBOARD_PASSWORD', '')
+
+def login_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if DASHBOARD_PASSWORD and not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    error = None
+    if request.method == 'POST':
+        if request.form.get('password') == DASHBOARD_PASSWORD:
+            session['logged_in'] = True
+            return redirect(url_for('index'))
+        error = 'Incorrect password.'
+    return render_template('login.html', error=error)
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
 
 # ── Claude client (optional — AI features disabled if key not set) ──────────────
 _api_key = os.environ.get('ANTHROPIC_API_KEY', '')
@@ -540,11 +567,13 @@ def rule_based_insights(months_data):
 
 # ── Routes ───────────────────────────────────────────────────────────────────────
 @app.route('/')
+@login_required
 def index():
     return render_template('index.html')
 
 
 @app.route('/api/dashboard')
+@login_required
 def api_dashboard():
     try:
         data = build_dashboard_data()
@@ -556,6 +585,7 @@ def api_dashboard():
 
 
 @app.route('/api/upload', methods=['POST'])
+@login_required
 def api_upload():
     files = request.files.getlist('files')
     if not files or all(not f.filename for f in files):
@@ -616,6 +646,7 @@ def api_upload():
 
 
 @app.route('/api/clients', methods=['POST'])
+@login_required
 def api_save_clients():
     poto_data = load_poto_data()
     poto_data['clients'] = request.get_json().get('clients', {})
@@ -624,6 +655,7 @@ def api_save_clients():
 
 
 @app.route('/api/contractors', methods=['POST'])
+@login_required
 def api_save_contractors():
     poto_data = load_poto_data()
     poto_data['contractors'] = request.get_json().get('contractors', {})
@@ -632,6 +664,7 @@ def api_save_contractors():
 
 
 @app.route('/api/insights')
+@login_required
 def api_insights():
     history = load_history()
     if not history:
@@ -681,6 +714,7 @@ def api_insights():
 
 
 @app.route('/api/ask', methods=['POST'])
+@login_required
 def api_ask():
     """Stream a Q&A response from Claude using Server-Sent Events."""
     if not CLAUDE_ENABLED:
@@ -742,6 +776,7 @@ Answer questions directly using the actual data above. Be specific with numbers.
 
 
 @app.route('/api/quote', methods=['POST'])
+@login_required
 def api_quote():
     """Generate a project quote using Claude."""
     if not CLAUDE_ENABLED:
