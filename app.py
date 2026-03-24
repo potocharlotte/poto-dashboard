@@ -31,8 +31,10 @@ POTO_DATA_JSON = DATA_DIR / 'poto-data.json'
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ── Claude client ───────────────────────────────────────────────────────────────
-claude = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
+# ── Claude client (optional — AI features disabled if key not set) ──────────────
+_api_key = os.environ.get('ANTHROPIC_API_KEY', '')
+claude = anthropic.Anthropic(api_key=_api_key) if _api_key else None
+CLAUDE_ENABLED = bool(_api_key)
 
 # ── Month mappings ──────────────────────────────────────────────────────────────
 MONTH_ABBR = {
@@ -646,41 +648,48 @@ def api_insights():
                 mo = int(parts[1])
                 m['short'] = f"{MONTH_SHORT[mo]} {parts[0][2:]}"
 
-    # Try Claude first; fall back to rule-based
-    try:
-        latest = months_data[-1]
-        prev   = months_data[-2] if len(months_data) >= 2 else None
+    # Try Claude if available; fall back to rule-based
+    if CLAUDE_ENABLED:
+        try:
+            latest = months_data[-1]
+            prev   = months_data[-2] if len(months_data) >= 2 else None
 
-        prompt = (
-            "You are analyzing finances for Poto Projects, a 2-person creative agency "
-            "(Charlotte Lao + Eric Yang).\n\n"
-            f"LATEST MONTH DATA:\n{json.dumps(latest, indent=2)}\n\n"
-            + (f"PREVIOUS MONTH:\n{json.dumps(prev, indent=2)}\n\n" if prev else "")
-            + "Generate exactly 5 concise financial insights. Use <strong> tags for key numbers. "
-            "Focus on: income trend, net profit/loss, owner draws, top expense, contractor costs vs revenue. "
-            'Return JSON: {"insights": ["html string", ...]}'
-        )
-        response = claude.messages.create(
-            model="claude-opus-4-6",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = next((b.text for b in response.content if b.type == "text"), "")
-        # Extract JSON from response
-        match = re.search(r'\{.*\}', text, re.DOTALL)
-        if match:
-            parsed = json.loads(match.group())
-            return jsonify({'insights': parsed.get('insights', []), 'source': 'claude'})
-    except Exception as e:
-        print(f"Claude insights error: {e}")
+            prompt = (
+                "You are analyzing finances for Poto Projects, a 2-person creative agency "
+                "(Charlotte Lao + Eric Yang).\n\n"
+                f"LATEST MONTH DATA:\n{json.dumps(latest, indent=2)}\n\n"
+                + (f"PREVIOUS MONTH:\n{json.dumps(prev, indent=2)}\n\n" if prev else "")
+                + "Generate exactly 5 concise financial insights. Use <strong> tags for key numbers. "
+                "Focus on: income trend, net profit/loss, owner draws, top expense, contractor costs vs revenue. "
+                'Return JSON: {"insights": ["html string", ...]}'
+            )
+            response = claude.messages.create(
+                model="claude-opus-4-6",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = next((b.text for b in response.content if b.type == "text"), "")
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group())
+                return jsonify({'insights': parsed.get('insights', []), 'source': 'claude'})
+        except Exception as e:
+            print(f"Claude insights error: {e}")
 
-    # Fallback
+    # Rule-based fallback (always works, no API key needed)
     return jsonify({'insights': rule_based_insights(months_data), 'source': 'fallback'})
 
 
 @app.route('/api/ask', methods=['POST'])
 def api_ask():
     """Stream a Q&A response from Claude using Server-Sent Events."""
+    if not CLAUDE_ENABLED:
+        def not_configured():
+            yield f"data: {json.dumps({'text': 'AI Q&A requires an Anthropic API key. Add ANTHROPIC_API_KEY in your Render environment settings to enable this feature.'})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        return Response(stream_with_context(not_configured()), content_type='text/event-stream',
+                        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
     data     = request.get_json()
     question = (data.get('question') or '').strip()
     if not question:
@@ -735,6 +744,9 @@ Answer questions directly using the actual data above. Be specific with numbers.
 @app.route('/api/quote', methods=['POST'])
 def api_quote():
     """Generate a project quote using Claude."""
+    if not CLAUDE_ENABLED:
+        return jsonify({'error': 'Quote Generator requires an Anthropic API key. Add ANTHROPIC_API_KEY in your Render environment settings to enable this feature.'})
+
     data = request.get_json()
 
     prompt = f"""Generate a detailed quote for a Poto Projects / Charlotte Lao (@claophoto) project.
